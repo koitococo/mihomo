@@ -33,12 +33,26 @@ type TrackerInfo struct {
 	RulePayload   string       `json:"rulePayload"`
 }
 
+func shouldCountProxyTraffic(chain C.Chain) bool {
+	if len(chain) == 0 {
+		return false
+	}
+
+	switch chain[0] {
+	case "DIRECT", "COMPATIBLE", "REJECT", "REJECT-DROP":
+		return false
+	default:
+		return true
+	}
+}
+
 type tcpTracker struct {
 	C.Conn `json:"-"`
 	*TrackerInfo
 	manager *Manager
 
-	pushToManager bool `json:"-"`
+	pushToManager     bool `json:"-"`
+	countProxyTraffic bool `json:"-"`
 }
 
 func (tt *tcpTracker) ID() string {
@@ -54,6 +68,9 @@ func (tt *tcpTracker) Read(b []byte) (int, error) {
 	download := int64(n)
 	if tt.pushToManager {
 		tt.manager.PushDownloaded(download)
+		if tt.countProxyTraffic {
+			tt.manager.PushProxyDownloaded(download)
+		}
 	}
 	tt.DownloadTotal.Add(download)
 	return n, err
@@ -64,6 +81,9 @@ func (tt *tcpTracker) ReadBuffer(buffer *buf.Buffer) (err error) {
 	download := int64(buffer.Len())
 	if tt.pushToManager {
 		tt.manager.PushDownloaded(download)
+		if tt.countProxyTraffic {
+			tt.manager.PushProxyDownloaded(download)
+		}
 	}
 	tt.DownloadTotal.Add(download)
 	return
@@ -73,6 +93,9 @@ func (tt *tcpTracker) UnwrapReader() (io.Reader, []N.CountFunc) {
 	return tt.Conn, []N.CountFunc{func(download int64) {
 		if tt.pushToManager {
 			tt.manager.PushDownloaded(download)
+			if tt.countProxyTraffic {
+				tt.manager.PushProxyDownloaded(download)
+			}
 		}
 		tt.DownloadTotal.Add(download)
 	}}
@@ -83,6 +106,9 @@ func (tt *tcpTracker) Write(b []byte) (int, error) {
 	upload := int64(n)
 	if tt.pushToManager {
 		tt.manager.PushUploaded(upload)
+		if tt.countProxyTraffic {
+			tt.manager.PushProxyUploaded(upload)
+		}
 	}
 	tt.UploadTotal.Add(upload)
 	return n, err
@@ -93,6 +119,9 @@ func (tt *tcpTracker) WriteBuffer(buffer *buf.Buffer) (err error) {
 	err = tt.Conn.WriteBuffer(buffer)
 	if tt.pushToManager {
 		tt.manager.PushUploaded(upload)
+		if tt.countProxyTraffic {
+			tt.manager.PushProxyUploaded(upload)
+		}
 	}
 	tt.UploadTotal.Add(upload)
 	return
@@ -102,6 +131,9 @@ func (tt *tcpTracker) UnwrapWriter() (io.Writer, []N.CountFunc) {
 	return tt.Conn, []N.CountFunc{func(upload int64) {
 		if tt.pushToManager {
 			tt.manager.PushUploaded(upload)
+			if tt.countProxyTraffic {
+				tt.manager.PushProxyUploaded(upload)
+			}
 		}
 		tt.UploadTotal.Add(upload)
 	}}
@@ -118,6 +150,7 @@ func (tt *tcpTracker) Upstream() any {
 
 func NewTCPTracker(conn C.Conn, manager *Manager, metadata *C.Metadata, rule C.Rule, uploadTotal int64, downloadTotal int64, pushToManager bool) *tcpTracker {
 	metadata.RemoteDst = conn.RemoteDestination()
+	countProxyTraffic := shouldCountProxyTraffic(conn.Chains())
 
 	t := &tcpTracker{
 		Conn:    conn,
@@ -132,15 +165,22 @@ func NewTCPTracker(conn C.Conn, manager *Manager, metadata *C.Metadata, rule C.R
 			UploadTotal:   atomic.NewInt64(uploadTotal),
 			DownloadTotal: atomic.NewInt64(downloadTotal),
 		},
-		pushToManager: pushToManager,
+		pushToManager:     pushToManager,
+		countProxyTraffic: countProxyTraffic,
 	}
 
 	if pushToManager {
 		if uploadTotal > 0 {
 			manager.PushUploaded(uploadTotal)
+			if countProxyTraffic {
+				manager.PushProxyUploaded(uploadTotal)
+			}
 		}
 		if downloadTotal > 0 {
 			manager.PushDownloaded(downloadTotal)
+			if countProxyTraffic {
+				manager.PushProxyDownloaded(downloadTotal)
+			}
 		}
 	}
 
@@ -158,7 +198,8 @@ type udpTracker struct {
 	*TrackerInfo
 	manager *Manager
 
-	pushToManager bool `json:"-"`
+	pushToManager     bool `json:"-"`
+	countProxyTraffic bool `json:"-"`
 }
 
 func (ut *udpTracker) ID() string {
@@ -174,6 +215,9 @@ func (ut *udpTracker) ReadFrom(b []byte) (int, net.Addr, error) {
 	download := int64(n)
 	if ut.pushToManager {
 		ut.manager.PushDownloaded(download)
+		if ut.countProxyTraffic {
+			ut.manager.PushProxyDownloaded(download)
+		}
 	}
 	ut.DownloadTotal.Add(download)
 	return n, addr, err
@@ -184,6 +228,9 @@ func (ut *udpTracker) WaitReadFrom() (data []byte, put func(), addr net.Addr, er
 	download := int64(len(data))
 	if ut.pushToManager {
 		ut.manager.PushDownloaded(download)
+		if ut.countProxyTraffic {
+			ut.manager.PushProxyDownloaded(download)
+		}
 	}
 	ut.DownloadTotal.Add(download)
 	return
@@ -194,6 +241,9 @@ func (ut *udpTracker) WriteTo(b []byte, addr net.Addr) (int, error) {
 	upload := int64(n)
 	if ut.pushToManager {
 		ut.manager.PushUploaded(upload)
+		if ut.countProxyTraffic {
+			ut.manager.PushProxyUploaded(upload)
+		}
 	}
 	ut.UploadTotal.Add(upload)
 	return n, err
@@ -210,6 +260,7 @@ func (ut *udpTracker) Upstream() any {
 
 func NewUDPTracker(conn C.PacketConn, manager *Manager, metadata *C.Metadata, rule C.Rule, uploadTotal int64, downloadTotal int64, pushToManager bool) *udpTracker {
 	metadata.RemoteDst = conn.RemoteDestination()
+	countProxyTraffic := shouldCountProxyTraffic(conn.Chains())
 
 	ut := &udpTracker{
 		PacketConn: conn,
@@ -224,15 +275,22 @@ func NewUDPTracker(conn C.PacketConn, manager *Manager, metadata *C.Metadata, ru
 			UploadTotal:   atomic.NewInt64(uploadTotal),
 			DownloadTotal: atomic.NewInt64(downloadTotal),
 		},
-		pushToManager: pushToManager,
+		pushToManager:     pushToManager,
+		countProxyTraffic: countProxyTraffic,
 	}
 
 	if pushToManager {
 		if uploadTotal > 0 {
 			manager.PushUploaded(uploadTotal)
+			if countProxyTraffic {
+				manager.PushProxyUploaded(uploadTotal)
+			}
 		}
 		if downloadTotal > 0 {
 			manager.PushDownloaded(downloadTotal)
+			if countProxyTraffic {
+				manager.PushProxyDownloaded(downloadTotal)
+			}
 		}
 	}
 
