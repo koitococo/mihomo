@@ -13,28 +13,32 @@ var DefaultManager *Manager
 
 func init() {
 	DefaultManager = &Manager{
-		uploadTemp:    atomic.NewInt64(0),
-		downloadTemp:  atomic.NewInt64(0),
-		uploadBlip:    atomic.NewInt64(0),
-		downloadBlip:  atomic.NewInt64(0),
-		uploadTotal:   atomic.NewInt64(0),
-		downloadTotal: atomic.NewInt64(0),
-		pid:           int32(os.Getpid()),
+		uploadTemp:         atomic.NewInt64(0),
+		downloadTemp:       atomic.NewInt64(0),
+		uploadBlip:         atomic.NewInt64(0),
+		downloadBlip:       atomic.NewInt64(0),
+		uploadTotal:        atomic.NewInt64(0),
+		downloadTotal:      atomic.NewInt64(0),
+		proxyUploadTotal:   atomic.NewInt64(0),
+		proxyDownloadTotal: atomic.NewInt64(0),
+		pid:                int32(os.Getpid()),
 	}
 
 	go DefaultManager.handle()
 }
 
 type Manager struct {
-	connections   xsync.Map[string, Tracker]
-	uploadTemp    atomic.Int64
-	downloadTemp  atomic.Int64
-	uploadBlip    atomic.Int64
-	downloadBlip  atomic.Int64
-	uploadTotal   atomic.Int64
-	downloadTotal atomic.Int64
-	pid           int32
-	memory        uint64
+	connections        xsync.Map[string, Tracker]
+	uploadTemp         atomic.Int64
+	downloadTemp       atomic.Int64
+	uploadBlip         atomic.Int64
+	downloadBlip       atomic.Int64
+	uploadTotal        atomic.Int64
+	downloadTotal      atomic.Int64
+	proxyUploadTotal   atomic.Int64
+	proxyDownloadTotal atomic.Int64
+	pid                int32
+	memory             uint64
 }
 
 func (m *Manager) Join(c Tracker) {
@@ -68,12 +72,24 @@ func (m *Manager) PushDownloaded(size int64) {
 	m.downloadTotal.Add(size)
 }
 
+func (m *Manager) PushProxyUploaded(size int64) {
+	m.proxyUploadTotal.Add(size)
+}
+
+func (m *Manager) PushProxyDownloaded(size int64) {
+	m.proxyDownloadTotal.Add(size)
+}
+
 func (m *Manager) Now() (up int64, down int64) {
 	return m.uploadBlip.Load(), m.downloadBlip.Load()
 }
 
 func (m *Manager) Total() (up, down int64) {
 	return m.uploadTotal.Load(), m.downloadTotal.Load()
+}
+
+func (m *Manager) ProxyTotal() (up, down int64) {
+	return m.proxyUploadTotal.Load(), m.proxyDownloadTotal.Load()
 }
 
 func (m *Manager) Memory() uint64 {
@@ -88,10 +104,12 @@ func (m *Manager) Snapshot() *Snapshot {
 		return true
 	})
 	return &Snapshot{
-		UploadTotal:   m.uploadTotal.Load(),
-		DownloadTotal: m.downloadTotal.Load(),
-		Connections:   connections,
-		Memory:        m.memory,
+		UploadTotal:        m.uploadTotal.Load(),
+		DownloadTotal:      m.downloadTotal.Load(),
+		ProxyUploadTotal:   m.proxyUploadTotal.Load(),
+		ProxyDownloadTotal: m.proxyDownloadTotal.Load(),
+		Connections:        connections,
+		Memory:             m.memory,
 	}
 }
 
@@ -107,9 +125,11 @@ func (m *Manager) ResetStatistic() {
 	m.uploadTemp.Store(0)
 	m.uploadBlip.Store(0)
 	m.uploadTotal.Store(0)
+	m.proxyUploadTotal.Store(0)
 	m.downloadTemp.Store(0)
 	m.downloadBlip.Store(0)
 	m.downloadTotal.Store(0)
+	m.proxyDownloadTotal.Store(0)
 }
 
 func (m *Manager) handle() {
@@ -122,8 +142,10 @@ func (m *Manager) handle() {
 }
 
 type Snapshot struct {
-	DownloadTotal int64          `json:"downloadTotal"`
-	UploadTotal   int64          `json:"uploadTotal"`
-	Connections   []*TrackerInfo `json:"connections"`
-	Memory        uint64         `json:"memory"`
+	DownloadTotal      int64          `json:"downloadTotal"`
+	UploadTotal        int64          `json:"uploadTotal"`
+	ProxyDownloadTotal int64          `json:"proxyDownloadTotal"`
+	ProxyUploadTotal   int64          `json:"proxyUploadTotal"`
+	Connections        []*TrackerInfo `json:"connections"`
+	Memory             uint64         `json:"memory"`
 }

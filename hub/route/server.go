@@ -46,10 +46,27 @@ func SetEmbedMode(embed bool) {
 }
 
 type Traffic struct {
-	Up        int64 `json:"up"`
-	Down      int64 `json:"down"`
-	UpTotal   int64 `json:"upTotal"`
-	DownTotal int64 `json:"downTotal"`
+	Up             int64 `json:"up"`
+	Down           int64 `json:"down"`
+	UpTotal        int64 `json:"upTotal"`
+	DownTotal      int64 `json:"downTotal"`
+	ProxyUpTotal   int64 `json:"proxyUpTotal"`
+	ProxyDownTotal int64 `json:"proxyDownTotal"`
+}
+
+func trafficSnapshot(t *statistic.Manager) Traffic {
+	up, down := t.Now()
+	upTotal, downTotal := t.Total()
+	proxyUpTotal, proxyDownTotal := t.ProxyTotal()
+
+	return Traffic{
+		Up:             up,
+		Down:           down,
+		UpTotal:        upTotal,
+		DownTotal:      downTotal,
+		ProxyUpTotal:   proxyUpTotal,
+		ProxyDownTotal: proxyDownTotal,
+	}
 }
 
 type Memory struct {
@@ -390,14 +407,7 @@ func traffic(w http.ResponseWriter, r *http.Request) {
 	var err error
 	for range tick.C {
 		buf.Reset()
-		up, down := t.Now()
-		upTotal, downTotal := t.Total()
-		if err := json.NewEncoder(buf).Encode(Traffic{
-			Up:        up,
-			Down:      down,
-			UpTotal:   upTotal,
-			DownTotal: downTotal,
-		}); err != nil {
+		if err := json.NewEncoder(buf).Encode(trafficSnapshot(t)); err != nil {
 			break
 		}
 
