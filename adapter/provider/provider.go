@@ -32,6 +32,11 @@ type ProxySchema struct {
 	Proxies []map[string]any `yaml:"proxies"`
 }
 
+type proxySet struct {
+	proxies       []C.Proxy
+	dialerProxies map[string]C.Proxy
+}
+
 type providerForApi struct {
 	Name             string            `json:"name"`
 	Type             string            `json:"type"`
@@ -44,11 +49,12 @@ type providerForApi struct {
 }
 
 type baseProvider struct {
-	mutex       sync.RWMutex
-	name        string
-	proxies     []C.Proxy
-	healthCheck *HealthCheck
-	version     uint32
+	mutex         sync.RWMutex
+	name          string
+	proxies       []C.Proxy
+	dialerProxies map[string]C.Proxy
+	healthCheck   *HealthCheck
+	version       uint32
 }
 
 func (bp *baseProvider) Name() string {
@@ -82,6 +88,13 @@ func (bp *baseProvider) Proxies() []C.Proxy {
 	return bp.proxies
 }
 
+func (bp *baseProvider) GetDialerProxy(name string) (C.Proxy, bool) {
+	bp.mutex.RLock()
+	defer bp.mutex.RUnlock()
+	proxy, ok := bp.dialerProxies[name]
+	return proxy, ok
+}
+
 func (bp *baseProvider) Count() int {
 	bp.mutex.RLock()
 	defer bp.mutex.RUnlock()
@@ -100,12 +113,13 @@ func (bp *baseProvider) RegisterHealthCheckTask(url string, expectedStatus utils
 	bp.healthCheck.registerHealthCheckTask(url, expectedStatus, filter, interval)
 }
 
-func (bp *baseProvider) setProxies(proxies []C.Proxy) {
+func (bp *baseProvider) setProxies(result proxySet) {
 	bp.mutex.Lock()
 	defer bp.mutex.Unlock()
-	bp.proxies = proxies
+	bp.proxies = result.proxies
+	bp.dialerProxies = result.dialerProxies
 	bp.version += 1
-	bp.healthCheck.setProxies(proxies)
+	bp.healthCheck.setProxies(result.proxies)
 	if bp.healthCheck.auto() {
 		go bp.healthCheck.check()
 	}
@@ -123,7 +137,7 @@ type ProxySetProvider struct {
 
 type proxySetProvider struct {
 	baseProvider
-	*resource.Fetcher[[]C.Proxy]
+	*resource.Fetcher[proxySet]
 	subscriptionInfo *SubscriptionInfo
 }
 
@@ -181,12 +195,13 @@ func (pp *proxySetProvider) Close() error {
 	return pp.Fetcher.Close()
 }
 
-func NewProxySetProvider(name string, interval time.Duration, payload []map[string]any, parser resource.Parser[[]C.Proxy], vehicle P.Vehicle, hc *HealthCheck) (*ProxySetProvider, error) {
+func NewProxySetProvider(name string, interval time.Duration, payload []map[string]any, parser resource.Parser[proxySet], vehicle P.Vehicle, hc *HealthCheck) (*ProxySetProvider, error) {
 	pd := &proxySetProvider{
 		baseProvider: baseProvider{
-			name:        name,
-			proxies:     []C.Proxy{},
-			healthCheck: hc,
+			name:          name,
+			proxies:       []C.Proxy{},
+			dialerProxies: map[string]C.Proxy{},
+			healthCheck:   hc,
 		},
 	}
 
@@ -196,16 +211,14 @@ func NewProxySetProvider(name string, interval time.Duration, payload []map[stri
 		if err != nil {
 			return nil, err
 		}
-		proxies, err := parser(buf)
+		result, err := parser(buf)
 		if err != nil {
 			return nil, err
 		}
-		pd.proxies = proxies
-		// direct call setProxies on hc to avoid starting a health check process immediately, it should be done by Initial()
-		hc.setProxies(proxies)
+		pd.setProxies(result)
 	}
 
-	fetcher := resource.NewFetcher[[]C.Proxy](name, interval, vehicle, nil, parser, pd.setProxies)
+	fetcher := resource.NewFetcher[proxySet](name, interval, vehicle, nil, parser, pd.setProxies)
 	pd.Fetcher = fetcher
 	if httpVehicle, ok := vehicle.(*resource.HTTPVehicle); ok {
 		httpVehicle.SetInRead(func(resp *http.Response) {
@@ -258,27 +271,27 @@ func (ip *inlineProvider) Update() error {
 	return nil
 }
 
-func NewInlineProvider(name string, payload []map[string]any, parser resource.Parser[[]C.Proxy], hc *HealthCheck) (*InlineProvider, error) {
+func NewInlineProvider(name string, payload []map[string]any, parser resource.Parser[proxySet], hc *HealthCheck) (*InlineProvider, error) {
 	ps := ProxySchema{Proxies: payload}
 	buf, err := yaml.Marshal(ps)
 	if err != nil {
 		return nil, err
 	}
-	proxies, err := parser(buf)
+	result, err := parser(buf)
 	if err != nil {
 		return nil, err
 	}
-	// direct call setProxies on hc to avoid starting a health check process immediately, it should be done by Initial()
-	hc.setProxies(proxies)
 
 	ip := &inlineProvider{
 		baseProvider: baseProvider{
-			name:        name,
-			proxies:     proxies,
-			healthCheck: hc,
+			name:          name,
+			proxies:       []C.Proxy{},
+			dialerProxies: map[string]C.Proxy{},
+			healthCheck:   hc,
 		},
 		updateAt: time.Now(),
 	}
+	ip.setProxies(result)
 	wrapper := &InlineProvider{ip}
 	runtime.SetFinalizer(wrapper, (*InlineProvider).Close)
 	return wrapper, nil
@@ -324,9 +337,10 @@ func NewCompatibleProvider(name string, proxies []C.Proxy, hc *HealthCheck) (*Co
 
 	pd := &compatibleProvider{
 		baseProvider: baseProvider{
-			name:        name,
-			proxies:     proxies,
-			healthCheck: hc,
+			name:          name,
+			proxies:       proxies,
+			dialerProxies: map[string]C.Proxy{},
+			healthCheck:   hc,
 		},
 	}
 
@@ -340,7 +354,27 @@ func (cp *CompatibleProvider) Close() error {
 	return cp.compatibleProvider.Close()
 }
 
-func NewProxiesParser(pdName string, tunnel C.Tunnel, filter string, excludeFilter string, excludeType string, dialerProxy string, override overrideSchema, ageSecretKey string) (resource.Parser[[]C.Proxy], error) {
+func parseProxySchema(buf []byte, ageSecretKey string) (*ProxySchema, error) {
+	buf, err := age.DecryptBytes(buf, ageSecretKey)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt config error: %w", err)
+	}
+
+	schema := &ProxySchema{}
+	if err := yaml.Unmarshal(buf, schema); err != nil {
+		proxies, err1 := convert.ConvertsV2Ray(buf)
+		if err1 != nil {
+			return nil, fmt.Errorf("%w, %w", err, err1)
+		}
+		schema.Proxies = proxies
+	}
+	if schema.Proxies == nil {
+		return nil, errors.New("file must have a `proxies` field")
+	}
+	return schema, nil
+}
+
+func NewProxiesParser(pdName string, tunnel C.Tunnel, topLevelProxyNames map[string]struct{}, filter string, excludeFilter string, excludeType string, dialerProxy string, override overrideSchema, ageSecretKey string) (resource.Parser[proxySet], error) {
 	var excludeTypeArray []string
 	if excludeType != "" {
 		excludeTypeArray = strings.Split(excludeType, "|")
@@ -372,25 +406,10 @@ func NewProxiesParser(pdName string, tunnel C.Tunnel, filter string, excludeFilt
 		}
 	}
 
-	return func(buf []byte) ([]C.Proxy, error) {
-		schema := &ProxySchema{}
-
-		// decrypt config
-		buf, err := age.DecryptBytes(buf, ageSecretKey)
+	return func(buf []byte) (proxySet, error) {
+		schema, err := parseProxySchema(buf, ageSecretKey)
 		if err != nil {
-			return nil, fmt.Errorf("decrypt config error: %w", err)
-		}
-
-		if err := yaml.Unmarshal(buf, schema); err != nil {
-			proxies, err1 := convert.ConvertsV2Ray(buf)
-			if err1 != nil {
-				return nil, fmt.Errorf("%w, %w", err, err1)
-			}
-			schema.Proxies = proxies
-		}
-
-		if schema.Proxies == nil {
-			return nil, errors.New("file must have a `proxies` field")
+			return proxySet{}, err
 		}
 
 		proxies := []C.Proxy{}
@@ -436,33 +455,95 @@ func NewProxiesParser(pdName string, tunnel C.Tunnel, filter string, excludeFilt
 				if _, ok := proxiesSet[name]; ok {
 					continue
 				}
-
-				if len(dialerProxy) > 0 {
+				if dialerProxy != "" {
 					mapping["dialer-proxy"] = dialerProxy
 				}
-
-				err := override.Apply(mapping)
-				if err != nil {
-					return nil, fmt.Errorf("proxy %d override error: %w", idx, err)
+				if err := override.Apply(mapping); err != nil {
+					return proxySet{}, fmt.Errorf("proxy %d override error: %w", idx, err)
 				}
-
 				proxy, err := adapter.ParseProxy(mapping, adapter.WithTunnelForAPI(tunnel), adapter.WithProviderName(pdName))
 				if err != nil {
-					return nil, fmt.Errorf("proxy %d error: %w", idx, err)
+					return proxySet{}, fmt.Errorf("proxy %d error: %w", idx, err)
 				}
-
 				proxiesSet[name] = struct{}{}
 				proxies = append(proxies, proxy)
 			}
 		}
-
 		if len(proxies) == 0 {
-			if len(filter) > 0 {
-				return nil, errors.New("doesn't match any proxy, please check your filter")
+			if filter != "" {
+				return proxySet{}, errors.New("doesn't match any proxy, please check your filter")
 			}
-			return nil, errors.New("file doesn't have any proxy")
+			return proxySet{}, errors.New("file doesn't have any proxy")
 		}
 
-		return proxies, nil
+		type dialerProxyRoot struct {
+			source string
+			target string
+		}
+		var roots []dialerProxyRoot
+		for _, proxy := range proxies {
+			if dialerProxy := proxy.ProxyInfo().DialerProxy; dialerProxy != "" {
+				roots = append(roots, dialerProxyRoot{source: proxy.Name(), target: dialerProxy})
+			}
+		}
+		if len(roots) == 0 {
+			return proxySet{proxies: proxies}, nil
+		}
+
+		rawSchema, err := parseProxySchema(buf, ageSecretKey)
+		if err != nil {
+			return proxySet{}, err
+		}
+		rawProxies := make(map[string]map[string]any, len(rawSchema.Proxies))
+		rawCounts := make(map[string]int, len(rawSchema.Proxies))
+		for _, mapping := range rawSchema.Proxies {
+			name, _ := mapping["name"].(string)
+			if name == "" {
+				continue
+			}
+			rawCounts[name]++
+			rawProxies[name] = mapping
+		}
+
+		dialerProxies := make(map[string]C.Proxy)
+		visiting := make(map[string]struct{})
+		var parseDialerProxy func(string, string) error
+		parseDialerProxy = func(source, name string) error {
+			if _, ok := topLevelProxyNames[name]; ok {
+				return nil
+			}
+			if _, ok := dialerProxies[name]; ok {
+				return nil
+			}
+			if _, ok := visiting[name]; ok {
+				return fmt.Errorf("proxy [%s] has circular dialer-proxy dependency", name)
+			}
+			if rawCounts[name] == 0 {
+				return fmt.Errorf("proxy [%s] dialer-proxy [%s] not found", source, name)
+			}
+			if rawCounts[name] > 1 {
+				return fmt.Errorf("proxy [%s] dialer-proxy [%s] has duplicate name", source, name)
+			}
+			visiting[name] = struct{}{}
+			defer delete(visiting, name)
+			mapping := rawProxies[name]
+			if next, _ := mapping["dialer-proxy"].(string); next != "" {
+				if err := parseDialerProxy(name, next); err != nil {
+					return err
+				}
+			}
+			proxy, err := adapter.ParseProxy(mapping, adapter.WithTunnelForAPI(tunnel), adapter.WithProviderName(pdName))
+			if err != nil {
+				return fmt.Errorf("proxy [%s] error: %w", name, err)
+			}
+			dialerProxies[name] = proxy
+			return nil
+		}
+		for _, root := range roots {
+			if err := parseDialerProxy(root.source, root.target); err != nil {
+				return proxySet{}, err
+			}
+		}
+		return proxySet{proxies: proxies, dialerProxies: dialerProxies}, nil
 	}, nil
 }

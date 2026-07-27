@@ -77,3 +77,66 @@ func TestValidateDialerProxies(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateProviderDialerProxies(t *testing.T) {
+	providerPayload := func(dialer string) []map[string]any {
+		return []map[string]any{
+			{"name": "source", "type": "socks5", "server": "127.0.0.1", "port": 1080, "dialer-proxy": dialer},
+			{"name": "hidden", "type": "socks5", "server": "127.0.0.1", "port": 1081},
+		}
+	}
+	tests := []struct {
+		name        string
+		proxy       []map[string]any
+		groups      []map[string]any
+		providers   map[string]map[string]any
+		errContains string
+	}{
+		{
+			name:  "top level cannot reference provider-only proxy",
+			proxy: []map[string]any{{"name": "top", "type": "socks5", "server": "127.0.0.1", "port": 1080, "dialer-proxy": "hidden"}},
+			providers: map[string]map[string]any{
+				"provider-a": {"type": "inline", "payload": providerPayload("")},
+			},
+			errContains: "not found",
+		},
+		{
+			name:  "provider can reference top-level static proxy",
+			proxy: []map[string]any{{"name": "top", "type": "socks5", "server": "127.0.0.1", "port": 1080}},
+			providers: map[string]map[string]any{
+				"provider-a": {"type": "inline", "filter": "^source$", "payload": providerPayload("top")},
+			},
+		},
+		{
+			name:   "provider can reference top-level group",
+			groups: []map[string]any{{"name": "top-group", "type": "select", "proxies": []string{"DIRECT"}}},
+			providers: map[string]map[string]any{
+				"provider-a": {"type": "inline", "filter": "^source$", "payload": providerPayload("top-group")},
+			},
+		},
+		{
+			name: "provider can reference own filtered raw proxy",
+			providers: map[string]map[string]any{
+				"provider-a": {"type": "inline", "filter": "^source$", "payload": providerPayload("hidden")},
+			},
+		},
+		{
+			name: "provider cannot reference another provider raw proxy",
+			providers: map[string]map[string]any{
+				"provider-a": {"type": "inline", "filter": "^source$", "payload": providerPayload("other-hidden")},
+				"provider-b": {"type": "inline", "payload": []map[string]any{{"name": "other-hidden", "type": "socks5", "server": "127.0.0.1", "port": 1082}}},
+			},
+			errContains: "not found",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, _, err := parseProxies(&RawConfig{Proxy: test.proxy, ProxyGroup: test.groups, ProxyProvider: test.providers})
+			if test.errContains == "" {
+				assert.NoError(t, err)
+			} else {
+				assert.ErrorContains(t, err, test.errContains)
+			}
+		})
+	}
+}
