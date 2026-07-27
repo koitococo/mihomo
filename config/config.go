@@ -925,6 +925,15 @@ func parseProxies(cfg *RawConfig) (proxies map[string]C.Proxy, providersMap map[
 		proxyList = append(proxyList, groupName)
 	}
 
+	topLevelProxyNames := make(map[string]struct{}, len(proxies)+len(groupsConfig)+1)
+	for name := range proxies {
+		topLevelProxyNames[name] = struct{}{}
+	}
+	for _, mapping := range groupsConfig {
+		topLevelProxyNames[mapping["name"].(string)] = struct{}{}
+	}
+	topLevelProxyNames["GLOBAL"] = struct{}{}
+
 	// check if any loop exists and sort the ProxyGroups
 	if err := proxyGroupsDagSort(groupsConfig); err != nil {
 		return nil, nil, err
@@ -937,7 +946,7 @@ func parseProxies(cfg *RawConfig) (proxies map[string]C.Proxy, providersMap map[
 			return nil, nil, fmt.Errorf("can not defined a provider called `%s`", provider.ReservedName)
 		}
 
-		pd, err := provider.ParseProxyProvider(name, mapping, T.Tunnel)
+		pd, err := provider.ParseProxyProvider(name, mapping, T.Tunnel, topLevelProxyNames)
 		if err != nil {
 			return nil, nil, fmt.Errorf("parse proxy provider %s error: %w", name, err)
 		}
