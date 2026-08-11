@@ -19,6 +19,8 @@ import (
 	"golang.org/x/exp/slices"
 )
 
+const urlTestWorkerCount = 10
+
 type GroupBase struct {
 	*outbound.Base
 	hidden            bool
@@ -239,27 +241,37 @@ func (gb *GroupBase) URLTest(ctx context.Context, url string, expectedStatus uti
 	var lock sync.Mutex
 	mp := map[string]uint16{}
 	proxies := gb.GetProxies(false)
-	for _, proxy := range proxies {
-		proxy := proxy
+	jobs := make(chan C.Proxy)
+
+	workers := urlTestWorkerCount
+	if len(proxies) < workers {
+		workers = len(proxies)
+	}
+	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func() {
-			delay, err := proxy.URLTest(ctx, url, expectedStatus)
-			if err == nil {
-				lock.Lock()
-				mp[proxy.Name()] = delay
-				lock.Unlock()
+			defer wg.Done()
+			for proxy := range jobs {
+				delay, err := proxy.URLTest(ctx, url, expectedStatus)
+				if err == nil {
+					lock.Lock()
+					mp[proxy.Name()] = delay
+					lock.Unlock()
+				}
 			}
-
-			wg.Done()
 		}()
 	}
+
+	for _, proxy := range proxies {
+		jobs <- proxy
+	}
+	close(jobs)
 	wg.Wait()
 
 	if len(mp) == 0 {
 		return mp, fmt.Errorf("get delay: all proxies timeout")
-	} else {
-		return mp, nil
 	}
+	return mp, nil
 }
 
 func (gb *GroupBase) onDialFailed(adapterType C.AdapterType, err error, fn func()) {
