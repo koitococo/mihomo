@@ -165,6 +165,7 @@ func (p *Proxy) MarshalJSON() ([]byte, error) {
 // implements C.Proxy
 func (p *Proxy) URLTest(ctx context.Context, url string, expectedStatus utils.IntRanges[uint16]) (t uint16, err error) {
 	var satisfied bool
+	var statusCode int
 
 	defer func() {
 		alive := err == nil
@@ -197,6 +198,17 @@ func (p *Proxy) URLTest(ctx context.Context, url string, expectedStatus utils.In
 			state.history.Pop()
 		}
 
+		if err != nil {
+			log.Warnln("[URLTest] %s -> %s error: %v", p.Name(), url, err)
+			return
+		}
+		if !satisfied {
+			if statusCode != 0 {
+				log.Warnln("[URLTest] %s -> %s status: %d not match expected: %s", p.Name(), url, statusCode, expectedStatus.String())
+			} else {
+				log.Warnln("[URLTest] %s -> %s failed: empty response", p.Name(), url)
+			}
+		}
 	}()
 
 	unifiedDelay := UnifiedDelay.Load()
@@ -254,6 +266,7 @@ func (p *Proxy) URLTest(ctx context.Context, url string, expectedStatus utils.In
 		return
 	}
 
+	statusCode = resp.StatusCode
 	_ = resp.Body.Close()
 
 	if unifiedDelay {
@@ -263,6 +276,7 @@ func (p *Proxy) URLTest(ctx context.Context, url string, expectedStatus utils.In
 		secondResp, ignoredErr = client.Do(req)
 		if ignoredErr == nil {
 			resp = secondResp
+			statusCode = resp.StatusCode
 			_ = resp.Body.Close()
 			start = second
 		} else {
