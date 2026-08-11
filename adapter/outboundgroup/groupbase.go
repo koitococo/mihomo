@@ -10,6 +10,7 @@ import (
 
 	"github.com/metacubex/mihomo/adapter/outbound"
 	"github.com/metacubex/mihomo/common/atomic"
+	"github.com/metacubex/mihomo/common/contextutils"
 	"github.com/metacubex/mihomo/common/utils"
 	C "github.com/metacubex/mihomo/constant"
 	P "github.com/metacubex/mihomo/constant/provider"
@@ -242,6 +243,17 @@ func (gb *GroupBase) URLTest(ctx context.Context, url string, expectedStatus uti
 	mp := map[string]uint16{}
 	proxies := gb.GetProxies(false)
 	jobs := make(chan C.Proxy)
+	timeout := gb.proxyURLTestTimeout(ctx)
+
+	// Parent deadline must not cap the whole pool wait: with limited concurrency,
+	// later proxies would inherit a nearly-expired shared budget and starve.
+	// Keep cancel-propagation for request abort; apply timeout per proxy instead.
+	baseCtx, baseCancel := context.WithCancel(contextutils.WithoutCancel(ctx))
+	stop := contextutils.AfterFunc(ctx, baseCancel)
+	defer func() {
+		stop()
+		baseCancel()
+	}()
 
 	workers := urlTestWorkerCount
 	if len(proxies) < workers {
@@ -252,7 +264,9 @@ func (gb *GroupBase) URLTest(ctx context.Context, url string, expectedStatus uti
 		go func() {
 			defer wg.Done()
 			for proxy := range jobs {
-				delay, err := proxy.URLTest(ctx, url, expectedStatus)
+				proxyCtx, proxyCancel := context.WithTimeout(baseCtx, timeout)
+				delay, err := proxy.URLTest(proxyCtx, url, expectedStatus)
+				proxyCancel()
 				if err == nil {
 					lock.Lock()
 					mp[proxy.Name()] = delay
@@ -272,6 +286,18 @@ func (gb *GroupBase) URLTest(ctx context.Context, url string, expectedStatus uti
 		return mp, fmt.Errorf("get delay: all proxies timeout")
 	}
 	return mp, nil
+}
+
+func (gb *GroupBase) proxyURLTestTimeout(ctx context.Context) time.Duration {
+	if timeout, ok := URLTestTimeoutFromContext(ctx); ok && timeout > 0 {
+		return timeout
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(deadline); remaining > 0 {
+			return remaining
+		}
+	}
+	return time.Duration(gb.testTimeout) * time.Millisecond
 }
 
 func (gb *GroupBase) onDialFailed(adapterType C.AdapterType, err error, fn func()) {

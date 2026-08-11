@@ -1,7 +1,6 @@
 package route
 
 import (
-	"context"
 	"strconv"
 	"time"
 
@@ -80,9 +79,9 @@ func getGroupDelay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), time.Millisecond*time.Duration(timeout))
-	defer cancel()
-
+	// timeout is a per-proxy budget. GroupBase.URLTest applies it inside the
+	// worker pool; do not attach an overall deadline here or queued proxies starve.
+	ctx := outboundgroup.WithURLTestTimeout(r.Context(), time.Millisecond*time.Duration(timeout))
 	dm, err := group.URLTest(ctx, url, expectedStatus)
 	if err != nil {
 		render.Status(r, http.StatusGatewayTimeout)
