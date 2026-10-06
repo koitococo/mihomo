@@ -67,6 +67,26 @@ Build with gvisor tun stack:
 go build -tags with_gvisor
 ```
 
+### Fork upstream synchronization
+
+The [Sync upstream Meta workflow](.github/workflows/sync-upstream.yml) checks
+`MetaCubeX/mihomo` daily at 03:17 UTC and can also be run manually. It targets
+this fork's `Meta` branch and selects the highest stable `vMAJOR.MINOR.PATCH`
+tag reachable from upstream `Meta`. It rebases only when that tag's commit is
+strictly after the merge base of the two branches; older or already integrated
+tags cause no changes.
+
+A successful rebase preserves fork-only commits and pushes `Meta` using
+`--force-with-lease` against the original checkout SHA. Conflicts or concurrent
+remote changes fail the workflow without publishing the rebased branch; resolve
+conflicts manually. This rewrites fork commit history.
+
+To enable the daily schedule, the workflow must also exist on the repository's
+default branch (`main`). GitHub Actions must be enabled, and repository rules
+must permit `GITHUB_TOKEN` to write and force-push `Meta`. Pushes made with
+`GITHUB_TOKEN` do not trigger other push workflows. GitHub may disable scheduled
+workflows in public repositories after 60 days without repository activity.
+
 ### IPTABLES configuration
 
 Work on Linux OS which supported `iptables`

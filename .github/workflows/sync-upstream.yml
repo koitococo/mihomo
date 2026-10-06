@@ -1,0 +1,109 @@
+name: Sync upstream Meta
+
+# Scheduled workflows run only from the repository's default branch. Merge this
+# workflow into main to enable the daily schedule.
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  # Required for the guarded force-push to the fork's Meta branch.
+
+# Serialize scheduled/manual runs so each lease is based on the latest Meta SHA.
+concurrency:
+  group: sync-upstream-Meta
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      # The Meta branch must exist; full history is needed to compute the rebase base.
+      - uses: actions/checkout@v6
+        with:
+          ref: Meta
+          fetch-depth: 0
+
+      - name: Rebase onto upstream tag
+        env:
+          TARGET_BRANCH: Meta
+          UPSTREAM_BRANCH: Meta
+          UPSTREAM_URL: https://github.com/MetaCubeX/mihomo.git
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # GITHUB_TOKEN pushes do not trigger other workflows, keeping this sync
+          # from recursively launching push-triggered CI.
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          expected=$(git rev-parse --verify HEAD)
+          upstream_ref="refs/remotes/upstream/${UPSTREAM_BRANCH}"
+
+          if git remote get-url upstream >/dev/null 2>&1; then
+            git remote set-url upstream "${UPSTREAM_URL}"
+          else
+            git remote add upstream "${UPSTREAM_URL}"
+          fi
+
+          git fetch --no-tags upstream "+refs/heads/${UPSTREAM_BRANCH}:${upstream_ref}"
+          git fetch --no-tags upstream "+refs/tags/*:refs/upstream-tags/*"
+
+          candidate=
+          candidate_tag=
+          while IFS= read -r tag_ref; do
+            # Accept stable vMAJOR.MINOR.PATCH tags only; prereleases (for example Alpha) are excluded.
+            [[ "${tag_ref}" =~ ^refs/upstream-tags/v[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
+
+            # Peel annotated tags and ignore tags that do not ultimately name a commit.
+            if ! tag_commit=$(git rev-parse --verify "${tag_ref}^{commit}" 2>/dev/null); then
+              continue
+            fi
+
+            if git merge-base --is-ancestor "${tag_commit}" "${upstream_ref}"; then
+              candidate=${tag_commit}
+              candidate_tag=${tag_ref#refs/upstream-tags/}
+              break
+            else
+              status=$?
+              if (( status > 1 )); then
+                exit "${status}"
+              fi
+            fi
+          done < <(git for-each-ref --sort=-version:refname --format='%(refname)' refs/upstream-tags)
+
+          if [[ -z "${candidate}" ]]; then
+            echo "No stable vMAJOR.MINOR.PATCH tag reachable from upstream/${UPSTREAM_BRANCH}; nothing to sync."
+            exit 0
+          fi
+
+          base=$(git merge-base "${expected}" "${upstream_ref}")
+          if [[ "${base}" == "${candidate}" ]]; then
+            echo "${candidate_tag} is already the merge base; nothing to sync."
+            exit 0
+          fi
+
+          # Only advance from a common ancestor to a newer stable-tag commit.
+          # Older tags and tags already present in this branch are deliberate no-ops.
+          if git merge-base --is-ancestor "${base}" "${candidate}"; then
+            :
+          else
+            status=$?
+            if (( status > 1 )); then
+              exit "${status}"
+            fi
+            echo "${candidate_tag} is not newer than the common ancestor; nothing to sync."
+            exit 0
+          fi
+
+          # Disable hooks and rerere so conflicts fail visibly rather than being
+          # auto-resolved or skipped. A failed rebase exits before the push.
+          git -c core.hooksPath=/dev/null -c rerere.enabled=false \
+            rebase --no-autostash --onto "${candidate}" "${base}"
+
+          # Lease against the exact checkout SHA; publish only the target Meta ref.
+          git push --force-with-lease="refs/heads/${TARGET_BRANCH}:${expected}" \
+            origin "HEAD:refs/heads/${TARGET_BRANCH}"
