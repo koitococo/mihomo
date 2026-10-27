@@ -17,6 +17,7 @@ import (
 	"github.com/metacubex/mihomo/log"
 
 	"github.com/dlclark/regexp2"
+	"github.com/metacubex/randv2"
 	"golang.org/x/exp/slices"
 )
 
@@ -37,6 +38,7 @@ type GroupBase struct {
 	testTimeout       int
 	maxFailedTimes    int
 	emptyFallback     C.Proxy
+	groupHealthCheck  *groupHealthCheck
 
 	// for GetProxies
 	getProxiesMutex  sync.Mutex
@@ -117,12 +119,18 @@ func (gb *GroupBase) EmptyFallback() C.Proxy {
 }
 
 func (gb *GroupBase) Touch() {
+	if gb.groupHealthCheck != nil {
+		gb.groupHealthCheck.touch(time.Now())
+	}
 	for _, pd := range gb.providers {
 		pd.Touch()
 	}
 }
 
 func (gb *GroupBase) GetProxies(touch bool) []C.Proxy {
+	if touch && gb.groupHealthCheck != nil {
+		gb.groupHealthCheck.touch(time.Now())
+	}
 	providerVersions := make([]uint32, len(gb.providers))
 	for i, pd := range gb.providers {
 		if touch { // touch first
@@ -238,9 +246,14 @@ func (gb *GroupBase) GetProxies(touch bool) []C.Proxy {
 }
 
 func (gb *GroupBase) URLTest(ctx context.Context, url string, expectedStatus utils.IntRanges[uint16]) (map[string]uint16, error) {
+	return gb.urlTest(ctx, url, expectedStatus, false)
+}
+
+func (gb *GroupBase) urlTest(ctx context.Context, url string, expectedStatus utils.IntRanges[uint16], automatic bool) (map[string]uint16, error) {
 	var wg sync.WaitGroup
 	var lock sync.Mutex
 	mp := map[string]uint16{}
+	skipped := 0
 	proxies := gb.GetProxies(false)
 	jobs := make(chan C.Proxy)
 	timeout := gb.proxyURLTestTimeout(ctx)
@@ -264,6 +277,12 @@ func (gb *GroupBase) URLTest(ctx context.Context, url string, expectedStatus uti
 		go func() {
 			defer wg.Done()
 			for proxy := range jobs {
+				if automatic && shouldSkipAutomaticURLTest(proxy, randv2.Float64()) {
+					lock.Lock()
+					skipped++
+					lock.Unlock()
+					continue
+				}
 				proxyCtx, proxyCancel := context.WithTimeout(baseCtx, timeout)
 				delay, err := proxy.URLTest(proxyCtx, url, expectedStatus)
 				proxyCancel()
@@ -282,7 +301,7 @@ func (gb *GroupBase) URLTest(ctx context.Context, url string, expectedStatus uti
 	close(jobs)
 	wg.Wait()
 
-	if len(mp) == 0 {
+	if len(mp) == 0 && skipped == 0 {
 		return mp, fmt.Errorf("get delay: all proxies timeout")
 	}
 	return mp, nil
@@ -343,6 +362,14 @@ func (gb *GroupBase) healthCheck() {
 	}
 
 	gb.failedTesting.Store(true)
+	defer func() {
+		gb.failedTesting.Store(false)
+		gb.failedTimes = 0
+	}()
+	if hc := gb.groupHealthCheck; hc != nil {
+		_, _ = gb.URLTest(context.Background(), hc.url, hc.expectedStatus)
+		return
+	}
 	wg := sync.WaitGroup{}
 	for _, proxyProvider := range gb.providers {
 		wg.Add(1)
@@ -354,8 +381,6 @@ func (gb *GroupBase) healthCheck() {
 	}
 
 	wg.Wait()
-	gb.failedTesting.Store(false)
-	gb.failedTimes = 0
 }
 
 func (gb *GroupBase) onDialSuccess() {

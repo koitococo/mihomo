@@ -1765,6 +1765,16 @@ proxies: # socks5
     interface-name: en1
     routing-mark: 6667
 proxy-groups:
+  # 自动健康检查的 interval 为定时触发周期（秒），不是上轮完成后的等待时间。
+  # 触发时若该组上轮检查尚未结束，则跳过本次触发并记录带组名的 info 日志，不排队或补跑。
+  # 每组独立调度，即使共用同一 proxy-provider；lazy 仍控制未被使用的组是否执行周期检查。
+  # proxy-provider 自身的 health-check 配置与组调度独立。
+  # 非 select 组未填写 interval 时默认 300 秒，仅配置 use 的组也不再继承 provider 的检查周期。
+  # select 组仅在显式配置正数 interval 时启用自动健康检查。
+  # 组与 provider 自动检查：单代理最近 5 次实际测速均为 timeout 时，按 min(.95,max(.05,timeout_times/all_times)) 概率跳过。
+  # timeout_times / all_times 为累计超时次数 / 实际测速次数，包含手动测速；跳过不计数，也不写入测速历史。
+  # 成功或非 timeout 结果会解除最近 5 次均超时的门控；手动单节点、整组及 provider 检查不应用概率跳过。
+  # 统计由每个代理对象跨 URL 共享，仅保留于对象生命周期内，重建后不持久化；无需配置开关。
   # url-test 将按照 url 测试结果使用延迟最低节点
   - name: "auto"
     type: url-test

@@ -97,6 +97,11 @@ func ApplyConfig(cfg *config.Config, force bool) {
 
 	updateExperimental(cfg.Experimental)
 	updateUsers(cfg.Users)
+	for _, proxy := range tunnel.Proxies() {
+		if group, ok := proxy.Adapter().(interface{ StopHealthCheck() }); ok {
+			group.StopHealthCheck()
+		}
+	}
 	updateProxies(cfg.Proxies, cfg.Providers)
 	updateRules(cfg.Rules, cfg.SubRules, cfg.RuleProviders)
 	updateSniffer(cfg.Sniffer)
@@ -115,6 +120,11 @@ func ApplyConfig(cfg *config.Config, force bool) {
 	loadProvider(cfg.Providers)
 	updateProfile(cfg)
 	loadProvider(cfg.RuleProviders)
+	for _, proxy := range cfg.Proxies {
+		if group, ok := proxy.Adapter().(interface{ StartHealthCheck() }); ok {
+			group.StartHealthCheck()
+		}
+	}
 	runtime.GC()
 	tunnel.OnRunning()
 	updateUpdater(cfg)

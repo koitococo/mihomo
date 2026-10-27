@@ -13,6 +13,7 @@ import (
 	"github.com/metacubex/mihomo/log"
 
 	"github.com/dlclark/regexp2"
+	"github.com/metacubex/randv2"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -27,30 +28,32 @@ type extraOption struct {
 }
 
 type HealthCheck struct {
-	ctx            context.Context
-	ctxCancel      context.CancelFunc
-	url            string
-	extra          map[string]*extraOption
-	mu             sync.Mutex
-	proxies        []C.Proxy
-	interval       time.Duration
-	lazy           bool
-	expectedStatus utils.IntRanges[uint16]
-	lastTouch      atomic.TypedValue[time.Time]
-	singleDo       *singledo.Single[struct{}]
-	timeout        time.Duration
+	ctx               context.Context
+	ctxCancel         context.CancelFunc
+	url               string
+	extra             map[string]*extraOption
+	mu                sync.Mutex
+	proxies           []C.Proxy
+	interval          time.Duration
+	lazy              bool
+	expectedStatus    utils.IntRanges[uint16]
+	lastTouch         atomic.TypedValue[time.Time]
+	singleDo          *singledo.Single[struct{}]
+	automaticSingleDo *singledo.Single[struct{}]
+	executionMu       sync.Mutex
+	timeout           time.Duration
 }
 
 func (hc *HealthCheck) process() {
 	ticker := time.NewTicker(hc.interval)
-	go hc.check()
+	go hc.checkAutomatic()
 	for {
 		select {
 		case <-ticker.C:
 			lastTouch := hc.lastTouch.Load()
 			since := time.Since(lastTouch)
 			if !hc.lazy || since < hc.interval {
-				hc.check()
+				hc.checkAutomatic()
 			} else {
 				log.Debugln("Skip once health check because we are lazy")
 			}
@@ -121,11 +124,26 @@ func (hc *HealthCheck) touch() {
 }
 
 func (hc *HealthCheck) check() {
+	hc.checkWithMode(false)
+}
+
+func (hc *HealthCheck) checkAutomatic() {
+	hc.checkWithMode(true)
+}
+
+func (hc *HealthCheck) checkWithMode(automatic bool) {
 	if len(hc.proxies) == 0 {
 		return
 	}
 
-	_, _, _ = hc.singleDo.Do(func() (struct{}, error) {
+	single := hc.singleDo
+	if automatic {
+		single = hc.automaticSingleDo
+	}
+	_, _, _ = single.Do(func() (struct{}, error) {
+		// Manual checks must wait for an automatic run, not inherit its skips.
+		hc.executionMu.Lock()
+		defer hc.executionMu.Unlock()
 		id := utils.NewUUIDV4().String()
 		log.Debugln("Start New Health Checking {%s}", id)
 		b := new(errgroup.Group)
@@ -133,12 +151,12 @@ func (hc *HealthCheck) check() {
 
 		// execute default health check
 		option := &extraOption{filters: nil, expectedStatus: hc.expectedStatus}
-		hc.execute(b, hc.url, id, option)
+		hc.executeWithMode(b, hc.url, id, option, automatic)
 
 		// execute extra health check
 		if len(hc.extra) != 0 {
 			for url, option := range hc.extra {
-				hc.execute(b, url, id, option)
+				hc.executeWithMode(b, url, id, option, automatic)
 			}
 		}
 		_ = b.Wait()
@@ -147,7 +165,7 @@ func (hc *HealthCheck) check() {
 	})
 }
 
-func (hc *HealthCheck) execute(b *errgroup.Group, url, uid string, option *extraOption) {
+func (hc *HealthCheck) executeWithMode(b *errgroup.Group, url, uid string, option *extraOption, automatic bool) {
 	url = strings.TrimSpace(url)
 	if len(url) == 0 {
 		log.Debugln("Health Check has been skipped due to testUrl is empty, {%s}", uid)
@@ -178,6 +196,9 @@ func (hc *HealthCheck) execute(b *errgroup.Group, url, uid string, option *extra
 
 		p := proxy
 		b.Go(func() error {
+			if automatic && shouldSkipAutomaticURLTest(p, randv2.Float64()) {
+				return nil
+			}
 			ctx, cancel := context.WithTimeout(hc.ctx, hc.timeout)
 			defer cancel()
 			log.Debugln("Health Checking, proxy: %s, url: %s, id: {%s}", p.Name(), url, uid)
@@ -203,15 +224,21 @@ func NewHealthCheck(proxies []C.Proxy, url string, timeout uint, interval uint, 
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &HealthCheck{
-		ctx:            ctx,
-		ctxCancel:      cancel,
-		proxies:        proxies,
-		url:            url,
-		timeout:        time.Duration(timeout) * time.Millisecond,
-		extra:          map[string]*extraOption{},
-		interval:       time.Duration(interval) * time.Second,
-		lazy:           lazy,
-		expectedStatus: expectedStatus,
-		singleDo:       singledo.NewSingle[struct{}](time.Second),
+		ctx:               ctx,
+		ctxCancel:         cancel,
+		proxies:           proxies,
+		url:               url,
+		timeout:           time.Duration(timeout) * time.Millisecond,
+		extra:             map[string]*extraOption{},
+		interval:          time.Duration(interval) * time.Second,
+		lazy:              lazy,
+		expectedStatus:    expectedStatus,
+		singleDo:          singledo.NewSingle[struct{}](time.Second),
+		automaticSingleDo: singledo.NewSingle[struct{}](time.Second),
 	}
+}
+
+func shouldSkipAutomaticURLTest(proxy C.Proxy, sample float64) bool {
+	stats, ok := proxy.(interface{ AutomaticURLTestSkipProbability() float64 })
+	return ok && sample < stats.AutomaticURLTestSkipProbability()
 }

@@ -109,6 +109,11 @@ func (bp *baseProvider) HealthCheckURL() string {
 	return bp.healthCheck.url
 }
 
+// HealthCheckExpectedStatus returns the provider's configured HTTP status ranges.
+func (bp *baseProvider) HealthCheckExpectedStatus() utils.IntRanges[uint16] {
+	return bp.healthCheck.expectedStatus
+}
+
 func (bp *baseProvider) RegisterHealthCheckTask(url string, expectedStatus utils.IntRanges[uint16], filter string, interval uint) {
 	bp.healthCheck.registerHealthCheckTask(url, expectedStatus, filter, interval)
 }
@@ -121,7 +126,7 @@ func (bp *baseProvider) setProxies(result proxySet) {
 	bp.version += 1
 	bp.healthCheck.setProxies(result.proxies)
 	if bp.healthCheck.auto() {
-		go bp.healthCheck.check()
+		go bp.healthCheck.checkAutomatic()
 	}
 }
 

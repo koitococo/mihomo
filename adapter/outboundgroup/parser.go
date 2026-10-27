@@ -146,9 +146,10 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 			if groupOption.URL == "" {
 				groupOption.URL = C.DefaultTestURL
 			}
-		} else {
-			addTestUrlToProviders(PDs, groupOption.URL, expectedStatus, groupOption.Filter, uint(groupOption.Interval))
 		}
+		_, explicitStatus := config["expected-status"]
+		expectedStatus = groupExpectedStatus(groupOption.URL, expectedStatus, explicitStatus, PDs)
+		groupOption.ExpectedStatus = expectedStatus.String()
 		providers = append(providers, PDs...)
 	}
 
@@ -166,14 +167,7 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 			groupOption.URL = C.DefaultTestURL
 		}
 
-		// select don't need auto health check
-		if groupOption.Type != "select" && groupOption.Type != "relay" {
-			if groupOption.Interval == 0 {
-				groupOption.Interval = 300
-			}
-		}
-
-		hc := provider.NewHealthCheck(ps, groupOption.URL, uint(groupOption.TestTimeout), uint(groupOption.Interval), groupOption.Lazy, expectedStatus)
+		hc := provider.NewHealthCheck(ps, groupOption.URL, uint(groupOption.TestTimeout), 0, groupOption.Lazy, expectedStatus)
 
 		pd, err := provider.NewCompatibleProvider(groupName, ps, hc)
 		if err != nil {
@@ -184,6 +178,18 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 		providersMap[groupName] = pd
 	}
 
+	if groupOption.Interval == 0 && groupOption.Type != "select" && groupOption.Type != "relay" {
+		groupOption.Interval = 300
+	}
+	finish := func(group ProxyGroup, err error) (ProxyGroup, error) {
+		if err == nil {
+			group.(interface {
+				configureHealthCheck(GroupCommonOption, utils.IntRanges[uint16])
+			}).configureHealthCheck(groupOption, expectedStatus)
+		}
+		return group, err
+	}
+
 	switch groupOption.Type {
 	case "url-test":
 		opt := URLTestOption{}
@@ -191,28 +197,28 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 		if err != nil {
 			return nil, err
 		}
-		return NewURLTest(groupOption, opt, emptyFallback, providers)
+		return finish(NewURLTest(groupOption, opt, emptyFallback, providers))
 	case "select":
 		opt := SelectorOption{}
 		err = decoder.Decode(config, &opt)
 		if err != nil {
 			return nil, err
 		}
-		return NewSelector(groupOption, opt, emptyFallback, providers)
+		return finish(NewSelector(groupOption, opt, emptyFallback, providers))
 	case "fallback":
 		opt := FallbackOption{}
 		err = decoder.Decode(config, &opt)
 		if err != nil {
 			return nil, err
 		}
-		return NewFallback(groupOption, opt, emptyFallback, providers)
+		return finish(NewFallback(groupOption, opt, emptyFallback, providers))
 	case "load-balance":
 		opt := LoadBalanceOption{}
 		err = decoder.Decode(config, &opt)
 		if err != nil {
 			return nil, err
 		}
-		return NewLoadBalance(groupOption, opt, emptyFallback, providers)
+		return finish(NewLoadBalance(groupOption, opt, emptyFallback, providers))
 	case "relay":
 		return nil, fmt.Errorf("%w: The group [%s] with relay type was removed, please using dialer-proxy instead", errType, groupName)
 	default:
@@ -248,12 +254,18 @@ func getProviders(mapping map[string]P.ProxyProvider, list []string) ([]P.ProxyP
 	return ps, nil
 }
 
-func addTestUrlToProviders(providers []P.ProxyProvider, url string, expectedStatus utils.IntRanges[uint16], filter string, interval uint) {
-	if len(providers) == 0 || len(url) == 0 {
-		return
+func groupExpectedStatus(url string, configured utils.IntRanges[uint16], explicit bool, providers []P.ProxyProvider) utils.IntRanges[uint16] {
+	if !explicit {
+		for _, pd := range providers {
+			if pd.HealthCheckURL() != url {
+				continue
+			}
+			if status, ok := pd.(interface {
+				HealthCheckExpectedStatus() utils.IntRanges[uint16]
+			}); ok {
+				return status.HealthCheckExpectedStatus()
+			}
+		}
 	}
-
-	for _, pd := range providers {
-		pd.RegisterHealthCheckTask(url, expectedStatus, filter, interval)
-	}
+	return configured
 }

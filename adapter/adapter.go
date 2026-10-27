@@ -33,9 +33,10 @@ type internalProxyState struct {
 
 type Proxy struct {
 	C.ProxyAdapter
-	alive   atomic.Bool
-	history *queue.Queue[C.DelayHistory]
-	extra   xsync.Map[string, *internalProxyState]
+	alive        atomic.Bool
+	history      *queue.Queue[C.DelayHistory]
+	extra        xsync.Map[string, *internalProxyState]
+	urlTestStats urlTestStatistics
 }
 
 // Adapter implements C.Proxy
@@ -161,6 +162,11 @@ func (p *Proxy) MarshalJSON() ([]byte, error) {
 	return json.Marshal(mapping)
 }
 
+// AutomaticURLTestSkipProbability returns the skip probability for automatic checks only.
+func (p *Proxy) AutomaticURLTestSkipProbability() float64 {
+	return p.urlTestStats.skipProbability()
+}
+
 // URLTest get the delay for the specified URL
 // implements C.Proxy
 func (p *Proxy) URLTest(ctx context.Context, url string, expectedStatus utils.IntRanges[uint16]) (t uint16, err error) {
@@ -168,6 +174,7 @@ func (p *Proxy) URLTest(ctx context.Context, url string, expectedStatus utils.In
 	var statusCode int
 
 	defer func() {
+		p.urlTestStats.record(err)
 		alive := err == nil
 		record := C.DelayHistory{Time: time.Now()}
 		if alive {
